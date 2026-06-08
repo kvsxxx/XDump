@@ -16,3 +16,21 @@ d8P' `?8b`?88P'`88b`?88P'?8bd88' d88'  88b  888888P'
 
 
 This is still work in progress tho so chill
+
+# Usaage
+
+```
+py v3.py
+```
+
+For dumping, use `help` for more info on each command.
+
+## `v3.py`
+
+The main python script that dumps the DMs etc.
+
+## `index.php`
+
+A php script that lists all chats that were dumped into `dump/`.
+
+Host this locally w [xampp](https://www.apachefriends.org/de/download.html) or sum 
