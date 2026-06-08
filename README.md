@@ -25,6 +25,9 @@ py v3.py
 
 For dumping, use `help` for more info on each command.
 
+
+Install [DrissionPage](https://pypi.org/project/DrissionPage/) with `pip install DrissionPage`
+
 ## `v3.py`
 
 The main python script that dumps the DMs etc.
