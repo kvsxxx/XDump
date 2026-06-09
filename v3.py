@@ -9,7 +9,7 @@ from __future__ import annotations
 from XDump.utils import *
 from XDump.blob import Downloader
 from XDump.console import Styles
-from XDump.checkpoint import checkpoint_set, checkpoint_get, append
+from XDump.checkpoint import checkpoint_set, checkpoint_get, append, add
 
 import os
 import re
@@ -31,11 +31,11 @@ if TYPE_CHECKING:
 chrome: ChromiumPage = None
 """Globales Chrome Element"""
 TWITTER_USERNAME = None
-"""Username der bei /whoami ausgeführt wird"""
+"""Username der bei `whoami` ausgeführt wird"""
 CACHING = True
 """Ob wir userlist cachen oder nicht"""
 DEBUG_CONSOLE = None
-"""Global const für Debug Console"""
+"""Global für Debug Console"""
 
 def debug(*args, style=Styles.NORMAL, **kwargs):
     """Funktion für debug print"""
@@ -96,6 +96,7 @@ class ChatCache:
         if key.startswith("@"):
             key = key.removeprefix("@")
         return self._chats.get(key.lower())
+
 chat_cache = ChatCache()
 """Der Chatcache von allen Chats, die einmal gefetcht wurden"""
     
@@ -114,7 +115,7 @@ class TwitterDM(TypedDict):
     id: str
     href: str
     avatar: str
-    avatar: list[str]
+    avatars: list[str]
     name: str
     username: str
     lastMessage: str
@@ -127,6 +128,31 @@ class GroupchatMember(TypedDict):
     status: str | None
     url: str
 
+
+js__getChatScrollInfo = """
+    const container = document.querySelector('[data-testid="dm-message-list"] > .scrollbar-thin-custom');
+    const scrollTop = container.scrollTop;
+    const containerHeight = container.clientHeight;
+    const lis = [...document.querySelectorAll('ul > li')];
+    const visible = lis.filter(li => {
+        const rect = li.getBoundingClientRect();
+        const containerRect = container.getBoundingClientRect();
+        return rect.top >= containerRect.top && rect.bottom <= containerRect.bottom;
+    });
+    const firstTop = visible.length ? visible[0].getBoundingClientRect().top - container.getBoundingClientRect().top + scrollTop : null;
+    console.log(visible);
+    return {
+        anchorTop: firstTop,
+        visibleCount: visible.length,
+        containerHeight: containerHeight,
+        scrollTop: scrollTop,
+        messageID: visible.length ? visible.find(li => li.querySelector('[data-testid^="message-"]'))
+            ?.querySelector('[data-testid^="message-"]')
+            ?.getAttribute("data-testid") 
+        : null
+    };
+"""
+"""JS Code um zu die oberste Message des aktuellen dump part zu fetchen."""
 
 js__getMyUsername = '(document.querySelector(\'[data-testid^="UserAvatar-Container-"]\')?.getAttribute("data-testid")?.slice(21))'
 """JS Code, der den aktuellen Benutzernamen fetcht.
@@ -190,15 +216,18 @@ js__parse_chat_data = """
         isGroupchat: isGroupchat
     })
 """
-"""Javascript Code für das parsen von einer Variable `el`.
+"""Javascript Code für das parsen von einer Variable `el`
 
 Gibt am Ende `return ({...})` zurück
 
 ```
-chrome.run_js(f\"\"\"
+x = chrome.run_js(f\"\"\"
     const el = document.querySelector('x');
     {js__parse_chat_data}
 \"\"\")
+
+>>> x
+{"id": ..., "href": ..., ...}
 ```
 """
 
@@ -261,30 +290,68 @@ def get_groupchat_members() -> list[GroupchatMember]:
     
     # Dialog schließen
     chrome.run_js("arguments[0].click()", close_button)
+    wait_for(lambda: chrome.run_js("""return document.querySelectorAll('[role="dialog"][data-state="open"]').length == 0 ? true : null"""))
     return members
 
+def _scroll_to_message(scrollbar, target_id):
+    """Scrollt nach oben bis die Ziel-Message im DOM sichtbar ist."""
+    clean_id = target_id.replace('message-', '')
+    for _ in range(500):
+        found = chrome.run_js(f"""
+            return !!document.querySelector('[data-testid="message-{clean_id}"]')
+        """)
+        if found:
+            return True
+        chrome.run_js("arguments[0].scrollTop -= 200", scrollbar)
+        chrome.wait(0.1)
+    return False
 
+# ======================================================================================================================
 
 def dump_current_chat(convo: TwitterDM, include_messages: bool = True, include_blobs: bool = True, include_files: bool = True):
     """Dumps the currently selected chat."""
+    checkpoint_set(current_chat_started_at=time())
+    
     if convo['username'] == None:
         convo['username'] = convo['id']
         clean_username = convo['id'].replace(":", "_")
     else:
         # Wir entfernen "@" von username
         clean_username = convo['username'] if not convo['isGroupchat'] else convo['name']
-    dump_path = (dump_base := "./dump") + "/" + clean_username + "_" + convo['id'].replace(":", "_")
+   
+    dump_path = "./dump/" + (inside_dump_dir := clean_username + "_" + convo['id'].replace(":", "_"))
+    """Wo der dump gespeichert wird."""
     dump_start = 0
     """Mit welchem Dump wir starten"""
+    last_message_id = None
+    """Die MessageID von der letzten gedumpten Message, brauchen wir für resuming"""
+    current_chat_id = None
+    """Chat ID die zuletzt gedumpt wurde."""
 
     # Wir testen dump path ob schon ein dump existiert, und ob da etwas drinnen ist
     if (dump_path_exists := os.path.exists(dump_path)) and len(files := os.listdir(dump_path)) != 0:
-        while (n := input("Daten löschen oder weitermachen? [Y/n] ") )not in ["Y", "n"]:
-            pass
-        if n == "Y":
-            shutil.rmtree(dump_path + "/", ignore_errors=True)
+        if (current_chat_id := checkpoint_get('current_chat_id') is not None):
+            prompt_text = "[D]elete current data, [c]ontinue or [a]bort? [D/c/a] "
+            prompt_options = {"D", "c", "a"}
         else:
-            dump_start = [x for x in len(files) if x.endswith(".dump")] 
+            prompt_text = "Delete current data? [Y/n] "
+            prompt_options = {"Y", "n"}
+            
+        while (n := input(prompt_text)) not in prompt_options:
+            pass
+        
+        # Löschen und von neu anfangen
+        if n in {"D", "Y"}:
+            shutil.rmtree(dump_path + "/", ignore_errors=True)
+        # Resume from checkpoint
+        elif "c" in prompt_options:
+            last_message_id = checkpoint_get('last_message_id')
+            current_chat_id = checkpoint_get('current_chat_id')
+            dump_start = checkpoint_get('last_dump_index')
+            checkpoint_set(current_chat_messages=0)
+        # Abort
+        else:
+            return print("Aborted.")
     
     os.makedirs(dump_path, exist_ok=True)
 
@@ -292,12 +359,24 @@ def dump_current_chat(convo: TwitterDM, include_messages: bool = True, include_b
     scrollbar = get_scrollbar()
     
     # Falls wir Groupchat haben, extrahieren wir erstmal die Member
+    # Aus irgendeinem Grund macht das hier probleme
     if convo['isGroupchat']:
         convo['members'] = get_groupchat_members()
-
+        # Hier müssen wir irgendwie sichergehen, das wir bis ganz nach unten scrollen können, aus irgendeinem Grund scrollt er wieder hoch
+        chrome.run_js("arguments[0].scrollTop = 9999999999", get_scrollbar())
 
     downloader = Downloader(chrome, dump_path)
-    for i in range(0, 10000):
+    
+    # Falls resume geht
+    if last_message_id and current_chat_id == convo['id']:
+        print(f"resuming from message {last_message_id}")
+        _scroll_to_message(scrollbar, last_message_id)
+    # Ansonsten bis ganz nach unten scrollen zum sichergehen
+    else:
+        chrome.run_js("arguments[0].scrollTop = 9999999999", scrollbar)
+    
+    checkpoint_set(current_dump_path=inside_dump_dir, current_chat_name=convo['name'], current_chat_id=convo['id'])
+    for i in range(dump_start, 10000):
         # Falls wir von "neu" anfangen
         if True:
             # Normale Dateien runterladen
@@ -318,32 +397,24 @@ def dump_current_chat(convo: TwitterDM, include_messages: bool = True, include_b
                     compressed = zcompress(html.encode("utf-8"))
                     f.write(compressed)
         
+        info = chrome.run_js(js__getChatScrollInfo)
         
-        info = chrome.run_js("""
-            const container = document.querySelector('[data-testid="dm-message-list"] > .scrollbar-thin-custom');
-            const scrollTop = container.scrollTop;
-            const containerHeight = container.clientHeight;
-            const lis = [...document.querySelectorAll('ul > li')];
-            const visible = lis.filter(li => {
-                const rect = li.getBoundingClientRect();
-                const containerRect = container.getBoundingClientRect();
-                return rect.top >= containerRect.top && rect.bottom <= containerRect.bottom;
-            });
-            const firstTop = visible.length ? visible[0].getBoundingClientRect().top - container.getBoundingClientRect().top + scrollTop : null;
-            return {
-                anchorTop: firstTop,
-                visibleCount: visible.length,
-                containerHeight: containerHeight,
-                scrollTop: scrollTop,
-                messageID: visible.length ? visible[0].querySelector('[data-testid^="message-"]')?.getAttribute("data-testid") : null
-            };
-        """)
-
+        debug("js__getChatScrollInfo", info)
+        if info.get('messageID'):
+            checkpoint_set(
+                last_message_id=info['messageID'],
+                last_dump_index=i,
+                current_chat_id=convo['id'],
+            )
+            
+        visible_count = info['visibleCount']
+        checkpoint_set(current_chat_messages=add(visible_count), total_messages_dumped=add(visible_count))
+        
         if info['scrollTop'] == 0:
             print("Fertig.")
             break
 
-        if info['visibleCount'] == 1:
+        if visible_count == 1:
             # Riesige Nachricht – um halbe Containerhöhe scrollen
             target = info['scrollTop'] - (info['containerHeight'] // 2)
         else:
@@ -367,6 +438,12 @@ def dump_current_chat(convo: TwitterDM, include_messages: bool = True, include_b
     with open(f"{dump_path}/info.json", "w") as f:
         f.write(json.dumps(convo))
     
+    checkpoint_set(
+        current_chat_id=None, 
+        current_dump_path=None, 
+        current_chat_name=None
+    )
+    
     print("Fertig mit chat.")    
 
 
@@ -375,7 +452,7 @@ OLD_TO_NEW = -1
 NEW_TO_OLD = +1
 """Dumps chats from newest to oldest."""
 
-def iter_conversations(c, order=NEW_TO_OLD, with_checkpoint=True):
+def iter_conversations(c, order=OLD_TO_NEW, with_checkpoint=True):
     """A generator that yields through all chats. 
     
     Ordered by the `order` param: `NEW_TO_OLD(+1)` or `OLD_TO_NEW(-1)`.
@@ -383,7 +460,7 @@ def iter_conversations(c, order=NEW_TO_OLD, with_checkpoint=True):
     If `with_checkpoint` is set, the `dump/checkpoint.json` done_ids will be skipped.
     """
     if with_checkpoint:
-        done_ids = set(checkpoint_get('done_ids'))
+        done_ids = set(checkpoint_get('done_ids', []))
     else:
         done_ids = set()
 
@@ -419,22 +496,22 @@ def iter_conversations(c, order=NEW_TO_OLD, with_checkpoint=True):
         items = get_visible_conversation_items()
         new_found = False
 
-        for item in (reversed(items) if order==OLD_TO_NEW else items):
-            debug("Item", item)
-            if item['id'] not in seen_ids and item['id'] not in done_ids:
-                debug("Item", item['id'], "not in seen_ids and", item['id'], "not in done_ids")
-                seen_ids.add(item['id'])
+        for dm in (reversed(items) if order==OLD_TO_NEW else items):
+            debug("Item", dm)
+            if dm['id'] not in seen_ids and dm['id'] not in done_ids:
+                debug("Item", dm['id'], "not in seen_ids and", dm['id'], "not in done_ids")
+                seen_ids.add(dm['id'])
                 new_found = True
                 debug("Adding chat_position to item")
                 
-                item |= {"position": chat_pos, "order": order}
+                dm |= {"position": chat_pos, "order": order}
                 debug("Yielding this item")
-                yield item
+                yield dm
                 # Increasing chat position
                 chat_pos += 1
             else:
-                debug("Item", item['id'], "already seen, we skipping this")
-                print("skipping", item)
+                debug("Item", dm['id'], "already seen, we skipping this")
+                print("skipping", dm)
 
         if not new_found:
             debug("Nothing new found, increasing no_new_count")
@@ -793,21 +870,26 @@ class Main:
     
     
     @command("dumpall", "da")
-    def dump_all(self, old_to_new: bool = False):
+    def dump_all(self, new_to_old: bool = False):
         """Dumps every chat seen in dm list from the top to the bottom.
         
-        If `old_to_new` is `True`, then the scraper will first scroll all the way down
-        to the bottom, to the oldest message.
+        If `new_to_old` is not set, then the scraper will first scroll all the way down
+        to the bottom, to the oldest chat and start dumping from there.
         
-        `old_to_new`: Whether the chats should be dumped from bottom to top (oldest to newest chat)
+        `new_to_old`: Whether the chats should be dumped from top to bottom (newest to oldest chat)
         """
         chrome = self.get_chrome()
         while not '/chat' in chrome.url:
             input("Bitte auf richtige URL gehen: ")
 
+        
+        os.makedirs("dump", exist_ok=True)
+        checkpoint_set(started_at=time())
         # Verwendung:
-        for conv in iter_conversations(chrome, OLD_TO_NEW if old_to_new else NEW_TO_OLD):
+        for n_chat, conv in enumerate(iter_conversations(chrome, NEW_TO_OLD if new_to_old else OLD_TO_NEW)):
             print(f"Chat: {conv['name']} ({conv['id']}), Groupchat: {conv['isGroupchat']}")
+            checkpoint_set(last_update=time())
+            checkpoint_set(total_chats=n_chat)
             
             prev_url = chrome.url
             chrome.listen.set_targets("blob:")
@@ -848,23 +930,28 @@ class Main:
             checkpoint_set(done_ids=append(conv['id']))
             debug("Saved checkpoint")
         
+        checkpoint_set(done=True)
+        
     
     @command("dump", "dc", "single")
     def dump_single(self):
         """Dumps the currently opened dm chat"""
         chrome = self.get_chrome()
         
-        if not re.search(r'\/i\/chat\/[a-zA-Z0-9\-+]?', (url := chrome.url)):
-            return print("narrwh", chrome.url)
-        
-        chrome.listen.set_targets("blob:")
-        chrome.listen.start()
-        input("letsgo")
         
         # Get current chat
         data = get_current_chat_data()
-        dump_current_chat(data, True, True, False)
+        if not data:
+            raise CommandInvokeException("Please select a chat first")
         
+        input("[Enter] to dump '" + data["name"] + "'")
+        
+        chrome.listen.set_targets("blob:")
+        chrome.listen.start()
+        chrome.get(data['href'])
+        wait_for(lambda: chrome.run_js("""return document.querySelector('[data-testid="dm-message-list]')"""))
+        
+        dump_current_chat(data, True, True, True)
         chrome.listen.stop()
         
     #endregion

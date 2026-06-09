@@ -14,6 +14,14 @@ if TYPE_CHECKING:
     from DrissionPage import ChromiumPage
     from DrissionPage._units.listener import DataPacket
 
+
+class UnprocessedBlob:
+    def __init__(self, worker: BlobWorker):
+        self.worker = worker
+        
+    async def resume(self):
+        return await self.worker._process_saved_blob()
+
 class FileMatch(TypedDict):
     elem: ChromiumElement
     """The corresponding element"""
@@ -220,7 +228,9 @@ class BlobFile:
         
     def rename(self, newname):
         """Renames this file and sets `self.finalname` to `newname`"""
-        os.rename(self.filepath, self.directory + newname)
+        if os.path.exists(nname := (self.directory + newname)):
+            os.remove(nname)
+        os.rename(self.filepath, nname)
         self.finalname = newname
                 
 
@@ -276,8 +286,6 @@ class BlobWorker:
             
             await self._process_saved_blob()
             print(f"[Worker {self.worker_id}] Processed {self.file.url}")
-
-
 
     async def is_submitted(self):
         """Guckt nach ob die Datei schon in `submitted` existiert per Hash"""
@@ -337,10 +345,17 @@ class BlobWorker:
                             "type": "voice_message",
                         })
                 elif audio_element.child_count == 2:
-                    name, size = self.parent.chrome._run_js(
-                        "const data = arguments[0].children[1]; return [data.children[0].textContent, data.children[1].textContent]",
+                    name, size = self.parent.chrome.run_js(
+                        "const data = arguments[0].children[1]; return [data.children[0]?.textContent, data.children[1]?.textContent]",
                         audio_element
                     )
+                    # Element ist noch nicht sichtbar
+                    if name is None or size is None:
+                        print("This needs to be postponed, but im too lazy to implement")
+                        # TODO: postponen
+                        return
+                        
+                        
                     _size = size.strip().upper().split()
                     size_num, size_unit = float(_size[0]), _size[1]
                     if size_unit == "GB":   size_num *= 1000**3
@@ -376,7 +391,7 @@ class BlobWorker:
         if self.file.elem:
             self.file.finalname = self.file.blobname
             self.parent.chrome.run_js(
-                f"arguments[0].outerHTML = arguments[0].outerHTML.replace('{self.file.url}', '{f'./dump/___/assets/{self.file.blobname}'}')",
+                f"arguments[0].outerHTML = arguments[0].outerHTML.replace('{self.file.url}', '{f'/___/assets/{self.file.blobname}'}')",
                 self.file.elem
             )
         # File confidentialities ausrechnen

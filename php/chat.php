@@ -1,6 +1,8 @@
 <?php 
 $for = $_GET['for'] ?? '';
-$path = "./dump/$for";
+
+$prettyPath = "/../dump/$for";
+$path = __DIR__ . $prettyPath;
 if (!$for || !is_dir($path)) {
     header('Location: index.php');
     exit;
@@ -356,11 +358,11 @@ $isGroup = $info['isGroupchat'] ?? false;
         </svg>
     </a>
     <div id="chat-avatar"><?= strtoupper(substr($uname, 0, 1)) ?></div>
-    <div id="header-info"<?= ($isGroup && count($members) > 0) ? ' onclick="openMembersPanel()" title="Mitglieder anzeigen"' : '' ?>>
+    <div id="header-info"<?= ($isGroup && count($members) > 0) ? ' onclick="openMembersPanel()" title="Show members"' : '' ?>>
         <div id="chat-title"><?= htmlspecialchars($uname) ?></div>
         <div id="chat-handle">
             <?php if ($isGroup && count($members) > 0): ?>
-                DM Archive &middot; <span style="color: var(--primary);"><?= count($members) ?> Mitglieder</span>
+                DM Archive &middot; <span style="color: var(--primary);"><?= count($members) ?> Members</span>
             <?php else: ?>
                 DM Archive
             <?php endif; ?>
@@ -382,7 +384,7 @@ $isGroup = $info['isGroupchat'] ?? false;
             </svg>
         </button>
     </div>
-    <div id="members-count"><?= count($members) ?> Mitglieder</div>
+    <div id="members-count"><?= count($members) ?> Members</div>
     <div id="members-list">
         <?php foreach ($members as $member): ?>
         <a class="member-item" href="<?= isset($member['url']) ? $member['url'] : '' ?>" target="_blank">
@@ -551,7 +553,7 @@ $isGroup = $info['isGroupchat'] ?? false;
     }
 
     // Blobs src fixen
-    [...document.querySelectorAll("[grabbed][src*='/___/assets/']")].map(c => c.src = c.src.replace('/___/assets/', `/<?= $for ?>/assets/`));
+    [...document.querySelectorAll("[grabbed][src*='/___/assets/']")].map(c => c.src = c.src.replace("/___/assets/", "/dump/<?= $for ?>/assets/"));
 
     // Poster rausfiltern aus videos, weil die blobs haben
     [...document.querySelectorAll('li video[poster*="blob:"]')].forEach(video => {
@@ -618,7 +620,7 @@ $isGroup = $info['isGroupchat'] ?? false;
 
         elem.querySelector('button').addEventListener('click', () => {
             apFilename.textContent = displayName;
-            apAudio.src = `./dump/<?= $for ?>/assets/${file}`;
+            apAudio.src = `<?= $prettyPath ?>/assets/${file}`;
             apPlayer.style.display = 'flex';
             apFill.style.width = '0%';
             apCurrent.textContent = '0:00';
@@ -738,7 +740,6 @@ $isGroup = $info['isGroupchat'] ?? false;
             container.addEventListener('mouseleave', () => controlsBar.style.opacity = '0');
         }
     });
-
 </script>
 </body>
 </html>
